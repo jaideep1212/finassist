@@ -46,7 +46,7 @@ def client():
     return TestClient(main.app)
 
 
-# ------------------------------------------------------------------ health
+# --------------------------- health -----------------------------------
 def test_healthz_reports_ok_and_pod(client):
     response = client.get("/healthz")
     assert response.status_code == 200
@@ -56,7 +56,7 @@ def test_healthz_reports_ok_and_pod(client):
     assert body["pod"]
 
 
-# ------------------------------------------------------------------ latest NAV
+# --------------------------- latest NAV --------------------------------
 def test_latest_nav_returns_our_format(client, fake_provider):
     response = client.get("/api/v1/nav/INF209K01322")
     assert response.status_code == 200
@@ -81,7 +81,7 @@ def test_calls_the_configured_provider_url(client, fake_provider):
     assert str(fake_provider[0].url) == "https://provider.test/nav/INF209K01322"
 
 
-# ------------------------------------------------------------------ configuration
+# --------------------------- configuration -------------------------------
 def test_service_refuses_to_start_without_provider_url(tmp_path):
     """Fail fast: without NAV_PROVIDER_URL the service must not start at all."""
     env = {k: v for k, v in os.environ.items() if k != "NAV_PROVIDER_URL"}
@@ -92,14 +92,70 @@ def test_service_refuses_to_start_without_provider_url(tmp_path):
     assert "NAV_PROVIDER_URL is not set" in result.stderr
 
 
-# ------------------------------------------------------------------ not built yet (Step 4.4)
-@pytest.mark.xfail(strict=True, reason="Step 4.4 adds ISIN validation")
-def test_invalid_isin_is_rejected_with_400(client, fake_provider):
-    response = client.get("/api/v1/nav/ABC")
+# -------------------------- validation and errors -------------------------------
+@pytest.mark.parametrize("bad_isin", ["ABC", "US0378331005", "INF209K0132", "INF209K013222", "INF209K0132$"])
+def test_invalid_isin_is_rejected_with_400(client, fake_provider, bad_isin):
+    response = client.get(f"/api/v1/nav/{bad_isin}")
     assert response.status_code == 400
+    assert "not a valid ISIN" in response.json()["detail"]
     assert fake_provider == []                   # the provider must not even be called
 
 
-@pytest.mark.xfail(strict=True, reason="Step 4.4 maps provider errors to clean codes")
+def test_path_tricks_never_reach_the_provider(client, fake_provider):
+    response = client.get("/api/v1/nav/..%2F..%2Fsecret")
+    assert response.status_code in (400, 404)    # rejected by validation or routing
+    assert fake_provider == []
+
+
+def test_lowercase_isin_is_accepted_and_normalised(client, fake_provider):
+    response = client.get("/api/v1/nav/inf209k01322")
+    assert response.status_code == 200
+    assert str(fake_provider[0].url).endswith("/INF209K01322")
+
+
 def test_unknown_isin_gives_404(client, fake_provider):
-    assert client.get("/api/v1/nav/INF000000000").status_code == 404
+    response = client.get("/api/v1/nav/INF000000000")
+    assert response.status_code == 404
+    assert "INF000000000" in response.json()["detail"]
+
+
+def use_provider(monkeypatch, handler):
+    """Install a fake provider that behaves the way `handler` says."""
+    monkeypatch.setattr(main, "http_client", httpx.Client(transport=httpx.MockTransport(handler)))
+
+
+def test_provider_server_error_gives_503(client, monkeypatch):
+    use_provider(monkeypatch, lambda request: httpx.Response(500, text="boom"))
+    response = client.get("/api/v1/nav/INF209K01322")
+    assert response.status_code == 503
+    assert "boom" not in response.text            # the provider's own error is never passed on
+
+
+def test_provider_unreachable_gives_503(client, monkeypatch):
+    def handler(request):
+        raise httpx.ConnectError("connection refused")
+    use_provider(monkeypatch, handler)
+    assert client.get("/api/v1/nav/INF209K01322").status_code == 503
+
+
+def test_provider_timeout_gives_503(client, monkeypatch):
+    def handler(request):
+        raise httpx.ReadTimeout("too slow")
+    use_provider(monkeypatch, handler)
+    response = client.get("/api/v1/nav/INF209K01322")
+    assert response.status_code == 503
+    assert "in time" in response.json()["detail"]
+
+
+@pytest.mark.parametrize("bad_body", [
+    {"ISIN": "INF209K01322", "name": "x"},                         # nav and date missing
+    {"ISIN": "INF209K01322", "name": "x", "nav": "abc", "date": "2026-10-27"},  # nav not a number
+])
+def test_unexpected_provider_data_gives_502(client, monkeypatch, bad_body):
+    use_provider(monkeypatch, lambda request: httpx.Response(200, json=bad_body))
+    assert client.get("/api/v1/nav/INF209K01322").status_code == 502
+
+
+def test_provider_sending_html_gives_502(client, monkeypatch):
+    use_provider(monkeypatch, lambda request: httpx.Response(200, text="<html>maintenance</html>"))
+    assert client.get("/api/v1/nav/INF209K01322").status_code == 502

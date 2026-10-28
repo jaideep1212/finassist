@@ -4,3 +4,5 @@ __pycache__/
 *.xls
 *.csv
 .env
+.pytest_cache/
+*.pyc
