@@ -4,19 +4,18 @@ import os
 import re
 import socket
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timezone, date
 
 import httpx
 from dotenv import find_dotenv, load_dotenv
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Query
 
-# Local development: read settings from the nearest .env file (searching upwards from the
-# folder you start uvicorn in, so the one at the project root is found).
+
 # Real environment variables (e.g. set by Kubernetes) are NOT overwritten by .env.
 load_dotenv(find_dotenv(usecwd=True))
 
 SERVICE = "nav-service"
-POD_NAME = os.getenv("POD_NAME", socket.gethostname())   # in Kubernetes: the pod's name
+POD_NAME = os.getenv("POD_NAME", socket.gethostname())   # for Kubernetes
 log = logging.getLogger(SERVICE)
 
 # Where the NAVs come from. Required setting: stop at startup with a clear message if missing,
@@ -29,11 +28,11 @@ PROVIDER_URL = PROVIDER_URL.rstrip("/")
 # An Indian ISIN: "IN", then 10 letters or digits (12 characters in total).
 ISIN_PATTERN = re.compile(r"^IN[A-Z0-9]{10}$")
 
-# Resilience settings (optional, with sensible defaults; can be changed in .env or Kubernetes).
-CONNECT_TIMEOUT = float(os.getenv("NAV_PROVIDER_CONNECT_TIMEOUT", "3"))   # seconds to connect
-READ_TIMEOUT = float(os.getenv("NAV_PROVIDER_READ_TIMEOUT", "10"))        # seconds for the answer
-RETRIES = int(os.getenv("NAV_PROVIDER_RETRIES", "2"))                     # extra attempts after the 1st
-BACKOFF_SECONDS = float(os.getenv("NAV_PROVIDER_BACKOFF_SECONDS", "0.5")) # first wait; doubles each time
+# Resilience settings
+CONNECT_TIMEOUT = 3.0   # seconds to connect
+READ_TIMEOUT = 10.0     # seconds for the answer
+RETRIES = 2             # number of retries after first attempt
+BACKOFF_SECONDS = 0.5   # first wait; doubles each time
 
 # Provider answers worth retrying: overloaded or temporarily broken. A 404 is NOT among them:
 # asking again for a fund that does not exist will never help.
@@ -76,11 +75,11 @@ def call_provider_with_retries(isin: str) -> httpx.Response:
         try:
             response = http_client.get(f"{PROVIDER_URL}/{isin}")
             if response.status_code not in RETRYABLE_STATUS:
-                return response                          # success, or an answer retrying cannot fix
+                return response
             problem = f"provider answered {response.status_code}"
         except httpx.TimeoutException:
             problem = "provider did not answer in time"
-        except httpx.TransportError as error:            # DNS failure, connection refused, reset ...
+        except httpx.TransportError as error:
             problem = f"provider unreachable ({type(error).__name__})"
 
         if attempt < attempts:
@@ -90,6 +89,31 @@ def call_provider_with_retries(isin: str) -> httpx.Response:
 
     log.warning("%s for %s, giving up after %d attempts", problem, isin, attempts)
     raise HTTPException(status_code=503, detail=f"NAV provider unavailable: {problem}")
+
+
+def clean_history(isin: str, raw) -> list[tuple[date, float]]:
+    """Turn the provider's [["2016-11-28", 13.4288], ...] into a clean, sorted list."""
+    if raw is None:
+        log.warning("provider sent no history for %s", isin)
+        return []
+    if not isinstance(raw, list):
+        raise ValueError("historical_nav is not a list")
+
+    by_date: dict[date, float] = {}
+    dropped = 0
+    for point in raw:
+        try:
+            day = date.fromisoformat(point[0])
+            nav = float(point[1])
+            if not nav > 0:
+                raise ValueError("NAV must be > 0")
+        except (TypeError, ValueError, IndexError, KeyError):
+            dropped += 1
+            continue
+        by_date[day] = nav
+    if dropped:
+        log.warning("dropped %d invalid history points for %s", dropped, isin)
+    return sorted(by_date.items())
 
 
 def fetch_from_provider(isin: str) -> dict:
@@ -109,8 +133,9 @@ def fetch_from_provider(isin: str) -> dict:
             "scheme_name": data["name"],
             "nav": float(data["nav"]),
             "nav_date": data["date"],
+            "history": clean_history(isin, data.get("historical_nav")),
         }
-    except (ValueError, KeyError, TypeError):    # not JSON, or fields missing / wrong type
+    except (ValueError, KeyError, TypeError, AttributeError):
         log.error("provider sent unexpected data for %s", isin)
         raise HTTPException(status_code=502, detail="NAV provider sent unexpected data") from None
 
@@ -121,7 +146,53 @@ def latest_nav(isin: str):
     clean_isin = validate_isin(isin)
     nav = fetch_from_provider(clean_isin)
     return {
-        **nav,
+        "isin": nav["isin"],
+        "scheme_name": nav["scheme_name"],
+        "nav": nav["nav"],
+        "nav_date": nav["nav_date"],
+        "source": "mf.captnemo.in",
+        "fetched_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "served_by": POD_NAME,
+    }
+
+
+def parse_date(raw: str | None, name: str) -> date | None:
+    """Turn '2019-01-01' into a date, or answer 400 Bad Request."""
+    if raw is None:
+        return None
+    try:
+        return date.fromisoformat(raw)
+    except ValueError:
+        raise HTTPException(status_code=400,
+                            detail=f"'{name}' must be a date like 2019-01-01, got '{raw}'") from None
+
+
+@app.get("/api/v1/nav/{isin}/history")
+def nav_history(isin: str,
+                from_: str | None = Query(None, alias="from", description="first date, YYYY-MM-DD"),
+                to: str | None = Query(None, description="last date, YYYY-MM-DD")):
+    """Daily NAV history of one fund, oldest first. Without from/to: the full history.
+
+    Days without a NAV (weekends, holidays) are simply absent: deciding which NAV a
+    holiday SIP gets is a financial rule and belongs to analytics-service.
+    """
+    clean_isin = validate_isin(isin)
+    start, end = parse_date(from_, "from"), parse_date(to, "to")
+    if start and end and start > end:
+        raise HTTPException(status_code=400, detail=f"'from' ({start}) is after 'to' ({end})")
+
+    fund = fetch_from_provider(clean_isin)
+
+    points = [{"date": day.isoformat(), "nav": nav}
+              for day, nav in fund["history"]
+              if (start is None or day >= start) and (end is None or day <= end)]
+    return {
+        "isin": fund["isin"],
+        "scheme_name": fund["scheme_name"],
+        "from": points[0]["date"] if points else (start.isoformat() if start else None),
+        "to": points[-1]["date"] if points else (end.isoformat() if end else None),
+        "count": len(points),
+        "points": points,
         "source": "mf.captnemo.in",
         "fetched_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "served_by": POD_NAME,

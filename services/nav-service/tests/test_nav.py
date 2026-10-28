@@ -7,6 +7,7 @@ from pathlib import Path
 import httpx
 import pytest
 from fastapi.testclient import TestClient
+from datetime import date
 
 from app import main
 
@@ -21,6 +22,12 @@ PROVIDER_ANSWER = {
     "historical_nav": [["2026-10-24", 1220.1], ["2026-10-27", 1234.5678]],
 }
 
+HISTORY_ANSWER = {**PROVIDER_ANSWER, "historical_nav": [
+    ["2026-10-20", 1210.0], ["2026-10-21", 1212.5],
+    # 2026-10-22 missing: a holiday
+    ["2026-10-23", 1215.0], ["2026-10-24", 1220.1], ["2026-10-27", 1234.5678],
+]}
+HISTORY_URL = "/api/v1/nav/INF209K01322/history"
 
 @pytest.fixture
 def fake_provider(monkeypatch):
@@ -156,7 +163,7 @@ def test_provider_timeout_gives_503(client, monkeypatch):
 
 @pytest.mark.parametrize("bad_body", [
     {"ISIN": "INF209K01322", "name": "x"},                         # nav and date missing
-    {"ISIN": "INF209K01322", "name": "x", "nav": "abc", "date": "2026-10-27"},  # nav not a number
+    {"ISIN": "INF209K01322", "name": "x", "nav": "abc", "date": "2026-10-27"},  # nav is not numeric
 ])
 def test_unexpected_provider_data_gives_502(client, monkeypatch, bad_body):
     use_provider(monkeypatch, lambda request: httpx.Response(200, json=bad_body))
@@ -167,7 +174,7 @@ def test_provider_sending_html_gives_502(client, monkeypatch):
     use_provider(monkeypatch, lambda request: httpx.Response(200, text="<html>maintenance</html>"))
     assert client.get("/api/v1/nav/INF209K01322").status_code == 502
 
-# ------------------------------------------------------------------ retries (Step 4.5)
+# --------------------------- retries ---------------------------
 def provider_that_answers(monkeypatch, *answers):
     """Fake provider giving these answers in order (a Response, or an exception to raise)."""
     calls = []
@@ -226,3 +233,63 @@ def test_client_uses_separate_connect_and_read_timeouts():
     timeout = main.http_client.timeout
     assert timeout.connect == 3
     assert timeout.read == 10
+
+# --------------------------- data cleaning ---------------------------
+
+def test_clean_history_drops_bad_points_dedupes_and_sorts():
+    raw = [
+        ["2026-10-27", 1234.5],
+        ["2026-10-20", 1210.0],
+        ["2026-10-20", 1211.0],      # duplicate date: last value wins
+        ["2026-10-21", 0],           # zero
+        ["2026-10-22", None],        # missing
+        ["2026-10-23", "abc"],       # not a number
+        ["2026-10-24", float("nan")],# NaN
+        ["bad-date", 1.0],           # bad date
+        ["2026-10-25"],              # incomplete
+    ]
+    assert main.clean_history("X", raw) == [(date(2026, 10, 20), 1211.0),
+                                             (date(2026, 10, 27), 1234.5)]
+
+
+def test_clean_history_missing_is_empty_but_wrong_type_is_an_error():
+    assert main.clean_history("X", None) == []
+    with pytest.raises(ValueError):
+        main.clean_history("X", {"oops": 1})
+
+# --------------------------- fetch history ---------------------------
+
+def test_history_full_series_in_our_format(client, monkeypatch):
+    use_provider(monkeypatch, lambda r: httpx.Response(200, json=HISTORY_ANSWER))
+    body = client.get(HISTORY_URL).json()
+    assert body["count"] == 5
+    assert body["points"][0] == {"date": "2026-10-20", "nav": 1210.0}
+    assert body["from"] == "2026-10-20" and body["to"] == "2026-10-27"
+    assert "historical_nav" not in body
+
+
+def test_history_range_is_inclusive_and_skips_holidays(client, monkeypatch):
+    use_provider(monkeypatch, lambda r: httpx.Response(200, json=HISTORY_ANSWER))
+    body = client.get(HISTORY_URL, params={"from": "2026-10-22", "to": "2026-10-24"}).json()
+    assert [p["date"] for p in body["points"]] == ["2026-10-23", "2026-10-24"]
+    assert body["from"] == "2026-10-23"          # real first date, not the requested holiday
+
+
+def test_history_empty_range_is_200(client, monkeypatch):
+    use_provider(monkeypatch, lambda r: httpx.Response(200, json=HISTORY_ANSWER))
+    response = client.get(HISTORY_URL, params={"from": "2001-01-01", "to": "2001-12-31"})
+    assert response.status_code == 200
+    assert response.json()["count"] == 0
+
+
+@pytest.mark.parametrize("params", [
+    {"from": "2026-13-01"}, {"to": "yesterday"}, {"from": "28-10-2026"},
+    {"from": "2026-10-27", "to": "2026-10-20"},
+])
+def test_history_bad_dates_give_400_without_calling_provider(client, fake_provider, params):
+    assert client.get(HISTORY_URL, params=params).status_code == 400
+    assert fake_provider == []
+
+
+def test_history_unknown_isin_gives_404(client, fake_provider):
+    assert client.get("/api/v1/nav/INF000000000/history").status_code == 404
