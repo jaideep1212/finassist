@@ -45,6 +45,13 @@ def fake_provider(monkeypatch):
 def client():
     return TestClient(main.app)
 
+@pytest.fixture(autouse=True)
+def no_real_waiting(monkeypatch):
+    """Retries wait between attempts. In tests, record the waits instead of sleeping."""
+    waits = []
+    monkeypatch.setattr(main.time, "sleep", waits.append)
+    return waits
+
 
 # --------------------------- health -----------------------------------
 def test_healthz_reports_ok_and_pod(client):
@@ -159,3 +166,63 @@ def test_unexpected_provider_data_gives_502(client, monkeypatch, bad_body):
 def test_provider_sending_html_gives_502(client, monkeypatch):
     use_provider(monkeypatch, lambda request: httpx.Response(200, text="<html>maintenance</html>"))
     assert client.get("/api/v1/nav/INF209K01322").status_code == 502
+
+# ------------------------------------------------------------------ retries (Step 4.5)
+def provider_that_answers(monkeypatch, *answers):
+    """Fake provider giving these answers in order (a Response, or an exception to raise)."""
+    calls = []
+    queue = list(answers)
+
+    def handler(request):
+        calls.append(request)
+        answer = queue.pop(0) if len(queue) > 1 else queue[0]   # last answer repeats
+        if isinstance(answer, Exception):
+            raise answer
+        return answer
+
+    use_provider(monkeypatch, handler)
+    return calls
+
+
+def test_brief_provider_error_is_retried_and_succeeds(client, monkeypatch, no_real_waiting):
+    calls = provider_that_answers(monkeypatch,
+                                  httpx.Response(503), httpx.Response(200, json=PROVIDER_ANSWER))
+    response = client.get("/api/v1/nav/INF209K01322")
+    assert response.status_code == 200
+    assert len(calls) == 2
+    assert no_real_waiting == [0.5]
+
+
+def test_timeouts_are_retried_with_growing_waits(client, monkeypatch, no_real_waiting):
+    calls = provider_that_answers(monkeypatch, httpx.ReadTimeout("slow"), httpx.ConnectError("down"),
+                                  httpx.Response(200, json=PROVIDER_ANSWER))
+    assert client.get("/api/v1/nav/INF209K01322").status_code == 200
+    assert len(calls) == 3
+    assert no_real_waiting == [0.5, 1.0]         # exponential backoff
+
+
+def test_gives_up_after_all_attempts(client, monkeypatch, no_real_waiting):
+    calls = provider_that_answers(monkeypatch, httpx.Response(500))
+    response = client.get("/api/v1/nav/INF209K01322")
+    assert response.status_code == 503
+    assert len(calls) == 3                       # 1 attempt + 2 retries
+    assert len(no_real_waiting) == 2             # no pointless wait after the last attempt
+
+
+def test_not_found_is_not_retried(client, monkeypatch, no_real_waiting):
+    calls = provider_that_answers(monkeypatch, httpx.Response(404))
+    assert client.get("/api/v1/nav/INF209K01322").status_code == 404
+    assert len(calls) == 1
+    assert no_real_waiting == []
+
+
+def test_bad_data_is_not_retried(client, monkeypatch):
+    calls = provider_that_answers(monkeypatch, httpx.Response(200, text="<html>"))
+    assert client.get("/api/v1/nav/INF209K01322").status_code == 502
+    assert len(calls) == 1
+
+
+def test_client_uses_separate_connect_and_read_timeouts():
+    timeout = main.http_client.timeout
+    assert timeout.connect == 3
+    assert timeout.read == 10
