@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>FinAssist – XIRR</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <header>
+    <h1>FinAssist</h1>
+    <p>Choose a fund and a customer to see the returns.</p>
+  </header>
+
+  <main>
+    <form id="choices" autocomplete="off">
+      <label for="amc">AMC</label>
+      <select id="amc" disabled></select>
+
+      <label for="fund">Fund</label>
+      <select id="fund" disabled></select>
+
+      <label for="holder">Customer</label>
+      <select id="holder" disabled></select>
+
+      <!-- shown only when the chosen customer has more than one folio in this fund -->
+      <label for="folio" id="folio-label" hidden>Folio</label>
+      <select id="folio" hidden></select>
+    </form>
+
+    <p id="message" role="status"></p>
+
+    <!-- Step 7.2: the raw answer. Step 7.3 replaces this with proper result sections. -->
+    <section id="results" hidden>
+      <h2>Answer from analytics-service</h2>
+      <pre id="raw"></pre>
+    </section>
+  </main>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>
