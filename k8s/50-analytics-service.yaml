@@ -1,0 +1,66 @@
+# analytics-service: Deployment (the pods) + Service (one stable address for them).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: analytics-service
+  namespace: finassist
+  labels:
+    app: analytics-service
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: analytics-service
+  template:
+    metadata:
+      labels:
+        app: analytics-service
+    spec:
+      containers:
+        - name: analytics-service
+          # DOCKERHUB_USER is replaced with your Docker Hub username when applying (see deploy).
+          image: DOCKERHUB_USER/finassist-analytics-service:0.1
+          ports:
+            - containerPort: 8002
+          envFrom:
+            - configMapRef:
+                name: finassist-config          # all non-secret settings
+          env:
+            - name: POD_NAME                    # shown as "served_by" / "pod" in answers
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+          # Liveness: is the process alive? Failing -> Kubernetes restarts the container.
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8002
+            initialDelaySeconds: 5
+            periodSeconds: 15
+          # Readiness: can it serve requests now? Failing -> no traffic, but no restart.
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 8002
+            initialDelaySeconds: 3
+            periodSeconds: 10
+          resources:
+            requests:                           # what the scheduler reserves
+              cpu: 50m
+              memory: 96Mi
+            limits:                             # the most it may use
+              cpu: 500m
+              memory: 256Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: analytics-service
+  namespace: finassist
+spec:
+  type: ClusterIP
+  selector:
+    app: analytics-service
+  ports:
+    - port: 8002
+      targetPort: 8002

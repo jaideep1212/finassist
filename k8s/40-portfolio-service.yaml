@@ -1,0 +1,71 @@
+# portfolio-service: Deployment (the pods) + Service (one stable address for them).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: portfolio-service
+  namespace: finassist
+  labels:
+    app: portfolio-service
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: portfolio-service
+  template:
+    metadata:
+      labels:
+        app: portfolio-service
+    spec:
+      containers:
+        - name: portfolio-service
+          # DOCKERHUB_USER is replaced with your Docker Hub username when applying (see deploy).
+          image: DOCKERHUB_USER/finassist-portfolio-service:0.1
+          ports:
+            - containerPort: 8001
+          envFrom:
+            - configMapRef:
+                name: finassist-config          # all non-secret settings
+          env:
+            - name: POD_NAME                    # shown as "served_by" / "pod" in answers
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: PGPASSWORD                  # from the Secret, never from a file
+              valueFrom:
+                secretKeyRef:
+                  name: postgres-secret
+                  key: postgres-password
+          # Liveness: is the process alive? Failing -> Kubernetes restarts the container.
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8001
+            initialDelaySeconds: 5
+            periodSeconds: 15
+          # Readiness: can it serve requests now? Failing -> no traffic, but no restart.
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: 8001
+            initialDelaySeconds: 3
+            periodSeconds: 10
+          resources:
+            requests:                           # what the scheduler reserves
+              cpu: 50m
+              memory: 96Mi
+            limits:                             # the most it may use
+              cpu: 500m
+              memory: 256Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: portfolio-service
+  namespace: finassist
+spec:
+  type: ClusterIP
+  selector:
+    app: portfolio-service
+  ports:
+    - port: 8001
+      targetPort: 8001

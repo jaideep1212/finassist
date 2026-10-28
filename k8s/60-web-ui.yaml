@@ -1,0 +1,68 @@
+# web-ui: Deployment (the pods) + Service (one stable address for them).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: web-ui
+  namespace: finassist
+  labels:
+    app: web-ui
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: web-ui
+  template:
+    metadata:
+      labels:
+        app: web-ui
+    spec:
+      containers:
+        - name: web-ui
+          # DOCKERHUB_USER is replaced with your Docker Hub username when applying (see deploy).
+          image: DOCKERHUB_USER/finassist-web-ui:0.1
+          ports:
+            - containerPort: 8080
+          envFrom:
+            - configMapRef:
+                name: finassist-config          # all non-secret settings
+          env:
+            - name: POD_NAME                    # shown as "served_by" / "pod" in answers
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+          # Liveness: is the process alive? Failing -> Kubernetes restarts the container.
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 15
+          # Readiness: can it serve requests now? Failing -> no traffic, but no restart.
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            initialDelaySeconds: 3
+            periodSeconds: 10
+          resources:
+            requests:                           # what the scheduler reserves
+              cpu: 50m
+              memory: 96Mi
+            limits:                             # the most it may use
+              cpu: 500m
+              memory: 256Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: web-ui
+  namespace: finassist
+spec:
+  # Docker Desktop makes a LoadBalancer service reachable at http://localhost:8080.
+  # The only service reachable from outside the cluster; the others are ClusterIP (internal).
+  type: LoadBalancer
+  selector:
+    app: web-ui
+  ports:
+    - port: 8080
+      targetPort: 8080

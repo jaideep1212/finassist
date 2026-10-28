@@ -1,0 +1,66 @@
+# nav-service: Deployment (the pods) + Service (one stable address for them).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: nav-service
+  namespace: finassist
+  labels:
+    app: nav-service
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: nav-service
+  template:
+    metadata:
+      labels:
+        app: nav-service
+    spec:
+      containers:
+        - name: nav-service
+          # DOCKERHUB_USER is replaced with your Docker Hub username when applying (see deploy).
+          image: DOCKERHUB_USER/finassist-nav-service:0.1
+          ports:
+            - containerPort: 8000
+          envFrom:
+            - configMapRef:
+                name: finassist-config          # all non-secret settings
+          env:
+            - name: POD_NAME                    # shown as "served_by" / "pod" in answers
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+          # Liveness: is the process alive? Failing -> Kubernetes restarts the container.
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8000
+            initialDelaySeconds: 5
+            periodSeconds: 15
+          # Readiness: can it serve requests now? Failing -> no traffic, but no restart.
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 8000
+            initialDelaySeconds: 3
+            periodSeconds: 10
+          resources:
+            requests:                           # what the scheduler reserves
+              cpu: 50m
+              memory: 96Mi
+            limits:                             # the most it may use
+              cpu: 500m
+              memory: 256Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: nav-service
+  namespace: finassist
+spec:
+  type: ClusterIP
+  selector:
+    app: nav-service
+  ports:
+    - port: 8000
+      targetPort: 8000

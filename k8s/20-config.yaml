@@ -1,0 +1,17 @@
+# Settings shared by the FinAssist services. NOT secret: the database password stays in the
+# Secret "postgres-secret" (created in Step 3) and is never written into any file.
+# Service addresses use Kubernetes service names: inside the cluster, the name IS the address.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: finassist-config
+  namespace: finassist
+data:
+  NAV_PROVIDER_URL: "https://mf.captnemo.in/nav"
+  NAV_SERVICE_URL: "http://nav-service:8000"
+  PORTFOLIO_SERVICE_URL: "http://portfolio-service:8001"
+  ANALYTICS_SERVICE_URL: "http://analytics-service:8002"
+  PGHOST: "postgres"
+  PGPORT: "5432"
+  PGDATABASE: "portfolio_db"
+  PGUSER: "postgres"
