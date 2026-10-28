@@ -220,3 +220,36 @@ def transactions_of_holding(isin: str, holder: str | None = None, folio: str | N
         "count": len(transactions),
         "transactions": transactions,
     }
+
+# -------------------------------- Fund choice ----------------------------------------
+@app.get("/api/v1/amcs")
+def list_amcs():
+    """All fund houses (AMCs) in the portfolio, sorted: the first dropdown."""
+    rows = query("SELECT DISTINCT entity_name FROM mf_base ORDER BY entity_name", ())
+    amcs = [row[0] for row in rows]
+    return {"amcs": amcs, "count": len(amcs)}
+
+
+@app.get("/api/v1/schemes")
+def list_schemes(amc: str | None = None):
+    """The funds (one per ISIN) held with one AMC, sorted by name: the second dropdown.
+
+    The AMC is a query parameter (?amc=...), not part of the path, because AMC names
+    contain spaces, '&' and possibly '/'.
+    """
+    amc = amc.strip() if amc else None
+    if not amc:
+        raise HTTPException(status_code=400, detail="choose an AMC with ?amc=")
+    # One row per ISIN. GROUP BY: if the same ISIN was stored with slightly different scheme
+    # names (e.g. renamed fund), it still appears once in the dropdown.
+    rows = query("""
+        SELECT isin, MIN(scheme_name) AS scheme_name
+        FROM mf_base
+        WHERE entity_name = %s
+        GROUP BY isin
+        ORDER BY scheme_name
+    """, (amc,))
+    if not rows:
+        raise HTTPException(status_code=404, detail=f"No funds found for AMC {amc}")
+    schemes = [{"isin": isin.strip(), "scheme_name": name} for isin, name in rows]
+    return {"amc": amc, "schemes": schemes, "count": len(schemes)}
