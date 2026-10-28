@@ -4,6 +4,7 @@ import os
 import re
 import socket
 from contextlib import asynccontextmanager
+from decimal import Decimal
 
 import psycopg
 from dotenv import find_dotenv, load_dotenv
@@ -15,7 +16,7 @@ from psycopg_pool import ConnectionPool
 load_dotenv(find_dotenv(usecwd=True))
 
 SERVICE = "portfolio-service"
-POD_NAME = socket.gethostname()
+POD_NAME = os.getenv("POD_NAME", socket.gethostname())
 log = logging.getLogger(SERVICE)
 
 # Database settings use PostgreSQL's standard names (PGHOST, PGPORT, ...), the same as the
@@ -27,8 +28,8 @@ if missing:
     raise RuntimeError(f"Missing database settings: {', '.join(missing)}. "
                        "Set them in .env (PGPASSWORD in your shell) or in Kubernetes.")
 
-DB_POOL_MAX = 5              # max open connections per pod
-DB_WAIT_SECONDS = 5.0        # max wait for a free connection
+DB_POOL_MAX = 5                 # max open connections per pod
+DB_WAIT_SECONDS = 5.0           # max wait for a free connection
 
 # A pool keeps a few connections open and lends them to requests. Opening a new PostgreSQL
 # connection per request costs a network round trip plus authentication each time.
@@ -77,7 +78,7 @@ def readyz():
     return {"status": "ready", "service": SERVICE, "pod": POD_NAME}
 
 
-# -------------------------- helpers ----------------------------------------
+# ----------------------------------- helpers -------------------------------
 # An Indian ISIN: "IN", then 10 letters or digits. Same rule as nav-service and the loader.
 ISIN_PATTERN = re.compile(r"^IN[A-Z0-9]{10}$")
 
@@ -109,7 +110,20 @@ def query(sql: str, params: tuple) -> list[tuple]:
         raise HTTPException(status_code=503, detail="database not available") from None
 
 
-# -------------------------------- endpoints ----------------------------------
+def find_holders(isin: str) -> list[str]:
+    """All holders of this fund, in any folio, sorted by name. 404 if nobody holds it."""
+    rows = query("""
+        SELECT DISTINCT first_holder
+        FROM mf_base
+        WHERE isin = %s
+        ORDER BY first_holder
+    """, (isin,))
+    if not rows:
+        raise HTTPException(status_code=404, detail=f"No investments for ISIN {isin}")
+    return [row[0] for row in rows]
+
+
+# ------------------------------- endpoints -------------------------------
 @app.get("/api/v1/isins/{isin}/holders")
 def holders_of_isin(isin: str):
     """Everyone who holds this fund, in any folio, sorted by name.
@@ -117,13 +131,68 @@ def holders_of_isin(isin: str):
     The web UI shows a customer combobox only when there is more than one holder.
     """
     clean_isin = validate_isin(isin)
-    rows = query("""
-        SELECT DISTINCT first_holder
-        FROM mf_base
-        WHERE isin = %s
-        ORDER BY first_holder
-    """, (clean_isin,))
-    if not rows:
-        raise HTTPException(status_code=404, detail=f"No investments for ISIN {clean_isin}")
-    holders = [row[0] for row in rows]
+    holders = find_holders(clean_isin)
     return {"isin": clean_isin, "holders": holders, "count": len(holders)}
+
+
+# How each transaction type changes the units held. DIV is a cash payout: units unchanged.
+# REV reverses an earlier purchase, so its units are taken away again.
+UNIT_EFFECT = {"PUR": 1, "REI": 1, "RED": -1, "REV": -1, "DIV": 0}
+
+
+def choose_holder(isin: str, requested: str | None) -> str:
+    """Apply the holder rule. The service enforces it, whatever the caller (UI, script, ...) does.
+
+    - exactly 1 holder:   'holder' may be omitted; that holder is used.
+    - several holders:    'holder' is required; without it -> 400 listing the holders.
+    - holder given but does not hold this fund -> 404.
+    """
+    holders = find_holders(isin)                         # 404 if nobody holds the fund
+    requested = requested.strip() if requested else None
+    if requested is None:
+        if len(holders) == 1:
+            return holders[0]
+        raise HTTPException(status_code=400, detail={
+            "message": f"ISIN {isin} has {len(holders)} holders; choose one with ?holder=",
+            "holders": holders,
+        })
+    if requested not in holders:
+        raise HTTPException(status_code=404, detail=f"{requested} holds no investments in ISIN {isin}")
+    return requested
+
+
+@app.get("/api/v1/isins/{isin}/transactions")
+def transactions_of_holder(isin: str, holder: str | None = None):
+    """All transactions of one holder in one fund, across ALL of the holder's folios,
+    oldest first, plus the units held today. This is the input for the customer XIRR.
+    """
+    clean_isin = validate_isin(isin)
+    chosen = choose_holder(clean_isin, holder)
+
+    rows = query("""
+        SELECT t.txn_id, b.folio_no, t.txn_date, t.txn_type, t.amount, t.realized_amt,
+               t.nav, t.units, t.stt, t.tds, t.stamp_duty
+        FROM mf_txns t
+        JOIN mf_base b ON b.fund_id = t.fund_id
+        WHERE b.isin = %s AND b.first_holder = %s
+        ORDER BY t.txn_date, t.txn_id
+    """, (clean_isin, chosen))
+
+    transactions, units_held = [], Decimal(0)
+    for (txn_id, folio_no, txn_date, txn_type, amount, realized_amt,
+         nav, units, stt, tds, stamp_duty) in rows:
+        units_held += UNIT_EFFECT[txn_type] * units      # Decimal: exact, no float rounding
+        transactions.append({
+            "txn_id": txn_id, "folio_no": folio_no, "txn_date": txn_date.isoformat(),
+            "txn_type": txn_type, "amount": float(amount), "realized_amt": float(realized_amt),
+            "nav": float(nav), "units": float(units),
+            "stt": float(stt), "tds": float(tds), "stamp_duty": float(stamp_duty),
+        })
+
+    return {
+        "isin": clean_isin,
+        "holder": chosen,
+        "units_held": float(units_held),
+        "count": len(transactions),
+        "transactions": transactions,
+    }

@@ -39,3 +39,13 @@ def add_holding(conn, isin, folio_no, holder, scheme_name="Some Fund", entity="S
            VALUES (%s, %s, %s, %s, %s) RETURNING fund_id""",
         (entity, scheme_name, isin, folio_no, holder),
     ).fetchone()[0]
+
+
+def add_txn(conn, fund_id, txn_date, txn_type, units=0, nav=0, amount=0, stamp_duty=0):
+    """Insert one transaction for a holding and return its new txn_id."""
+    return conn.execute(
+        """INSERT INTO mf_txns (fund_id, txn_date, txn_type, amount, realized_amt,
+                                nav, units, stamp_duty)
+           VALUES (%s, %s, %s, %s, %s, %s, %s, %s) RETURNING txn_id""",
+        (fund_id, txn_date, txn_type, amount, amount - stamp_duty, nav, units, stamp_duty),
+    ).fetchone()[0]
