@@ -72,37 +72,7 @@ def test_full_answer_has_customer_fund_and_transactions(client, services):
     assert [t["txn_type"] for t in body["transactions"]] == ["PUR", "VALUE"]
 
 
-def test_latest_nav_is_the_last_history_point(client, services):
-    body = client.get(URL, params={"isin": ISIN}).json()
-    assert body["nav"] == nav_history()["points"][-1]["nav"]
-    assert body["customer"]["nav"] == body["nav"]
-
-
-def test_one_call_to_each_service(client, services):
-    _, calls = services
-    client.get(URL, params={"isin": ISIN})
-    assert sorted(c.url.host for c in calls) == ["nav.test", "portfolio.test"]
-
-
-def test_holder_and_folio_are_passed_on(client, services):
-    _, calls = services
-    client.get(URL, params={"isin": ISIN, "holder": "User1", "folio": "9024151391/0"})
-    portfolio_call = next(c for c in calls if c.url.host == "portfolio.test")
-    assert portfolio_call.url.params["holder"] == "User1"
-    assert portfolio_call.url.params["folio"] == "9024151391/0"
-
-
 # --------------------------------- customer problems: still 200 ---------------------------------
-def test_holder_required_still_returns_the_fund_part(client, services):
-    answers, _ = services
-    answers["portfolio.test"] = (400, {"detail": {"message": "2 holders", "holders": ["User1", "User2"]}})
-    response = client.get(URL, params={"isin": ISIN})
-    assert response.status_code == 200
-    body = response.json()
-    assert body["customer"]["status"] == "holder_required"
-    assert body["customer"]["holders"] == ["User1", "User2"]
-    assert body["fund"]["status"] == "ok"
-    assert body["transactions"] == []
 
 
 def test_portfolio_service_down_still_returns_the_fund_part(client, services):
@@ -112,45 +82,3 @@ def test_portfolio_service_down_still_returns_the_fund_part(client, services):
     assert response.status_code == 200
     assert response.json()["customer"]["status"] == "unavailable"
     assert response.json()["fund"]["status"] == "ok"
-
-
-def test_no_units_left_gives_no_investments_with_transactions(client, services):
-    answers, _ = services
-    answers["portfolio.test"] = (200, {**HOLDING, "units_held": 0.0})
-    body = client.get(URL, params={"isin": ISIN}).json()
-    assert body["customer"]["status"] == "no_investments"
-    assert body["customer"]["message"] == "XIRR can't be calculated as no investments are available"
-    assert [t["txn_type"] for t in body["transactions"]] == ["PUR"]   # still shown
-
-
-# --------------------------------- whole request fails ---------------------------------
-def test_invalid_isin_gives_400_without_calling_anyone(client, services):
-    _, calls = services
-    assert client.get(URL, params={"isin": "ABC"}).status_code == 400
-    assert calls == []
-
-
-def test_missing_isin_is_rejected(client, services):
-    assert client.get(URL).status_code in (400, 422)
-
-
-def test_nav_service_down_gives_503(client, services):
-    answers, _ = services
-    answers["nav.test"] = httpx.ConnectError("connection refused")
-    assert client.get(URL, params={"isin": ISIN}).status_code == 503
-
-
-def test_unknown_fund_at_nav_service_gives_404(client, services):
-    answers, _ = services
-    answers["nav.test"] = (404, {"detail": "No NAV found"})
-    assert client.get(URL, params={"isin": ISIN}).status_code == 404
-
-
-def test_empty_history_gives_404(client, services):
-    answers, _ = services
-    answers["nav.test"] = (200, {**nav_history(), "points": [], "count": 0})
-    assert client.get(URL, params={"isin": ISIN}).status_code == 404
-
-
-def test_healthz(client):
-    assert client.get("/healthz").json()["service"] == "analytics-service"

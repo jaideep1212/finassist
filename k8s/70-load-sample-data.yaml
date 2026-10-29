@@ -20,7 +20,7 @@ spec:
       containers:
         - name: loader
           image: DOCKERHUB_USER/finassist-loader:0.1
-          args: ["--file", "/data/FinAssist_sample_data.xlsx", "--schema", "/data/schema.sql"]
+          args: ["--file", "/data/sample_data.xlsx", "--schema", "/data/schema.sql"]
           envFrom:
             - configMapRef:
                 name: finassist-config      # PGHOST=postgres, PGPORT, PGDATABASE, PGUSER
