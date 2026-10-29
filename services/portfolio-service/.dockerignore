@@ -1,12 +1,9 @@
-# Not needed in the image: tests, local settings, caches, virtual environments.
-tests/
-loader/
+# Only load_excel.py and requirements.txt belong in the image. Never a workbook with real data.
+*.xlsx
+*.xls
+*.csv
 .env
-.venv/
+check_db.py
 **/__pycache__/
-**/*.pyc
-.pytest_cache/
-pytest.ini
-requirements-dev.txt
 Dockerfile
 .dockerignore

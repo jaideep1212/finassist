@@ -1,25 +1,18 @@
-# portfolio-service: container image.
-# Slim official Python image, same major version as local development (3.11).
+# Excel loader: runs ONCE as a Kubernetes Job to fill an empty database from a workbook.
+# The workbook and schema.sql are not in the image; the Job mounts them from a ConfigMap.
 FROM python:3.11-slim
 
-# No .pyc files in the image; log lines appear immediately (not buffered).
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1
 
-WORKDIR /service
+WORKDIR /loader
 
-# 1. Dependencies first, in their own layer: rebuilt only when requirements.txt changes,
-#    not on every code change, so rebuilds after a code edit take seconds.
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# 2. Then the code. Tests, .env and caches are excluded by .dockerignore.
-COPY app ./app
+COPY load_excel.py .
 
-# 3. Never run as root inside the container.
 RUN useradd --create-home --uid 10001 appuser
 USER appuser
 
-EXPOSE 8001
-# --host 0.0.0.0: listen on all interfaces, otherwise nothing outside the container can connect.
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8001"]
+ENTRYPOINT ["python", "load_excel.py"]

@@ -33,7 +33,7 @@ class RowError(ValueError):
     """A value in one row is missing or invalid, so that row is rejected."""
 
 
-# ---------------------------- read tables -------------------------------------
+# ----------------------------------------------------------------- reading
 def read_sheet(workbook, name, required):
     """Return a list of (excel_row_number, {column_name: value}) for every non-empty row."""
     if name not in workbook.sheetnames:
@@ -54,7 +54,7 @@ def read_sheet(workbook, name, required):
     return records
 
 
-# ---------------------------- cleaning helpers -------------------------------------
+# ----------------------------------------------------------------- cleaning helpers
 def to_text(value, column, max_len, required=True):
     """Trim text; numbers become text without '.0'; empty -> error or None."""
     if value is None or str(value).strip() == "":
@@ -105,7 +105,7 @@ def to_date(value, column):
         raise RowError(f"{column} is not a date: {value!r}") from None
 
 
-# ---------------------------- validation -------------------------------------
+# ----------------------------------------------------------------- validation
 def clean_base(rows, rejected, warnings):
     """Turn MFBase rows into clean dicts for table mf_base. Bad rows go to `rejected`.
 
@@ -189,7 +189,7 @@ def clean_txns(rows, valid_excel_ids, rejected):
     return clean
 
 
-# ---------------------------- write to database -------------------------------------
+# ----------------------------------------------------------------- writing
 # No ID in the column list: the database creates fund_id and txn_id itself (IDENTITY).
 # RETURNING hands back the new fund_id, so transactions can be linked to it.
 INSERT_BASE = """
@@ -212,8 +212,12 @@ class TablesNotEmpty(Exception):
     """The one-time load has already been done."""
 
 
-def write_to_database(base, txns):
-    """Write all rows in ONE transaction: everything is saved, or nothing is."""
+def write_to_database(base, txns, schema_sql=None):
+    """Write all rows in ONE transaction: everything is saved, or nothing is.
+
+    schema_sql: optional text of db/schema.sql. If given, the tables are created first (it only
+    uses CREATE ... IF NOT EXISTS, so existing tables are left alone). Used by the Kubernetes Job.
+    """
     if not os.getenv("PGPASSWORD"):
         raise SystemExit("PGPASSWORD is not set. Run the $env:PGPASSWORD line from Step 3.6 first.")
 
@@ -227,6 +231,9 @@ def write_to_database(base, txns):
         connect_timeout=10,
     ) as conn:
         with conn.cursor() as cur:
+            if schema_sql:
+                cur.execute(schema_sql)             # create the tables if they do not exist yet
+
             # Lock both tables until we commit, so two loaders started at the same time
             # cannot both see "empty" and both load. Normal reads still work meanwhile.
             cur.execute("LOCK TABLE mf_base, mf_txns IN EXCLUSIVE MODE")
@@ -251,11 +258,13 @@ def write_to_database(base, txns):
     print(f"Database now holds {holdings} holdings and {transactions} transactions.")
 
 
-# ------------------------- main -------------------------------------
+# ----------------------------------------------------------------- main
 def main():
     parser = argparse.ArgumentParser(description="Load the investment workbook (one-time initial load)")
     parser.add_argument("--file", required=True, type=Path, help="path to the .xlsx file")
     parser.add_argument("--dry-run", action="store_true", help="validate only, write nothing")
+    parser.add_argument("--schema", type=Path,
+                        help="optional: path to db/schema.sql; creates the tables first if missing")
     args = parser.parse_args()
 
     workbook = openpyxl.load_workbook(args.file, read_only=True, data_only=True)
@@ -279,7 +288,7 @@ def main():
         print("Dry run: the database was not touched.")
     else:
         try:
-            write_to_database(base, txns)
+            write_to_database(base, txns, args.schema.read_text(encoding="utf-8") if args.schema else None)
         except TablesNotEmpty:
             print("Load REFUSED: the tables already contain data. "
                   "The Excel import is a one-time initial load; nothing was changed.")

@@ -1,0 +1,43 @@
+# One-time Job: loads the sample workbook into PostgreSQL with the project's own Excel loader.
+#
+# Before applying, create the ConfigMap with the input files (from the project folder):
+#   kubectl create configmap loader-input -n finassist \
+#     --from-file=sample-data/FinAssist_sample_data.xlsx \
+#     --from-file=services/portfolio-service/db/schema.sql
+#
+# The loader creates the tables if needed, validates every row and loads everything in one
+# database transaction. It refuses to load into tables that already contain data.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: load-sample-data
+  namespace: finassist
+spec:
+  backoffLimit: 0                 # a failed load is reported, not retried (it may be "already loaded")
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: loader
+          image: DOCKERHUB_USER/finassist-loader:0.1
+          args: ["--file", "/data/FinAssist_sample_data.xlsx", "--schema", "/data/schema.sql"]
+          envFrom:
+            - configMapRef:
+                name: finassist-config      # PGHOST=postgres, PGPORT, PGDATABASE, PGUSER
+          env:
+            - name: PGPASSWORD              # from the Secret, never from a file
+              valueFrom:
+                secretKeyRef:
+                  name: postgres-secret
+                  key: postgres-password
+          volumeMounts:
+            - name: input
+              mountPath: /data
+              readOnly: true
+          resources:
+            requests: { cpu: 50m, memory: 96Mi }
+            limits:   { cpu: 500m, memory: 256Mi }
+      volumes:
+        - name: input
+          configMap:
+            name: loader-input
